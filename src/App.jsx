@@ -52,9 +52,9 @@ const CATEGORIES = ["Marketing", "Supplies", "Labor", "Venue/Rent", "Food & Bev"
 const INCOME_CATEGORIES = ["Sales", "Event Revenue", "Services", "Refund", "Other Income"];
 const EXPENSE_SOURCES = ["Owner's Cash", "Business Checking", "Business Credit Card", "Cash App", "PayPal", "Venmo", "Square", "Zelle", "Other"];
 const INCOME_SOURCES = ["Cash", "Square", "Cash App", "PayPal", "Venmo", "Zelle", "Check", "Bank Transfer", "Other"];
-const TABS = ["dashboard", "events", "transactions", "blueroots", "breakeven", "inventory", "goals", "bestsellers"];
+const TABS = ["dashboard", "events", "transactions", "blueroots", "breakeven", "inventory", "goals", "bestsellers", "whatif"];
 const PRIMARY_TABS = ["dashboard", "events", "blueroots", "breakeven"];
-const MORE_TABS = ["transactions", "inventory", "goals", "bestsellers"];
+const MORE_TABS = ["transactions", "inventory", "goals", "bestsellers", "whatif"];
 
 const fmt = (n) => `$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const pct = (n) => `${Math.round(n)}%`;
@@ -247,6 +247,19 @@ export default function App() {
   const [showAddEvent, setShowAddEvent] = useState(false);
   const [showAddProduct, setShowAddProduct] = useState(false);
   const [showAddSupply, setShowAddSupply] = useState(false);
+  const [showQuickEntry, setShowQuickEntry] = useState(false);
+  const [showCsvImport, setShowCsvImport] = useState(false);
+  const [quickEntryData, setQuickEntryData] = useState({});
+  const [quickEntryEventId, setQuickEntryEventId] = useState("");
+  const [csvImportText, setCsvImportText] = useState("");
+  const [csvImportPreview, setCsvImportPreview] = useState([]);
+  const [csvImportEventId, setCsvImportEventId] = useState("");
+  const [whatIfPrice, setWhatIfPrice] = useState({});
+  const [whatIfSupplyIncrease, setWhatIfSupplyIncrease] = useState(0);
+  const [whatIfWholesaleDiscount, setWhatIfWholesaleDiscount] = useState(50);
+  const [whatIfHelperHours, setWhatIfHelperHours] = useState(0);
+  const [whatIfHelperRate, setWhatIfHelperRate] = useState(15);
+  const [whatIfEventsPerMonth, setWhatIfEventsPerMonth] = useState(2);
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -506,6 +519,120 @@ export default function App() {
     setLiveSales({}); setShowSaveConfirm(false); setSaving(false);
   };
 
+  // Save Quick Entry — batch enter sales after the event
+  const saveQuickEntry = async () => {
+    if (!quickEntryEventId) { alert("Pick an event first"); return; }
+    const eventId = Number(quickEntryEventId);
+    const eventName = events.find(e => e.id === eventId)?.name || "Unknown";
+    const date = events.find(e => e.id === eventId)?.date || new Date().toISOString().split("T")[0];
+    const entries = Object.entries(quickEntryData).filter(([,qty]) => parseInt(qty) > 0).map(([pid, qty]) => {
+      const p = products.find(p => String(p.id) === String(pid));
+      const q = parseInt(qty);
+      return { product_id: Number(pid), product_name: p?.name||"Unknown", price: p?.price||0, cogs: p?.cogs||0, qty: q, revenue: (p?.price||0)*q, event_id: eventId, event_name: eventName, date };
+    });
+    if (!entries.length) { alert("Enter at least one quantity"); return; }
+    setSaving(true);
+    const shRes = await sb.insert(token, "sales_history", entries);
+    setProductSalesHistory(prev => [...prev, ...(Array.isArray(shRes) ? shRes : [shRes])]);
+    const txEntries = entries.map(e => ({ type: "income", description: `${e.qty} x ${e.product_name}`, amount: e.revenue, category: "Sales", source: "Quick Entry", is_owner_funded: false, event_id: eventId, date }));
+    const txRes = await sb.insert(token, "transactions", txEntries);
+    setTransactions(prev => [...prev, ...(Array.isArray(txRes) ? txRes : [txRes])]);
+
+    // Auto-decrement product stock
+    const updatedProducts = [...products];
+    for (const entry of entries) {
+      const idx = updatedProducts.findIndex(p => p.id === entry.product_id);
+      if (idx >= 0 && updatedProducts[idx].stock > 0) {
+        const newStock = Math.max(0, (updatedProducts[idx].stock || 0) - entry.qty);
+        await sb.update(token, "products", entry.product_id, { stock: newStock });
+        updatedProducts[idx] = { ...updatedProducts[idx], stock: newStock };
+      }
+    }
+    setProducts(updatedProducts);
+
+    setQuickEntryData({}); setShowQuickEntry(false); setSaving(false);
+  };
+
+  // Parse CSV (simple parser — handles quoted fields)
+  const parseCsv = (text) => {
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 2) return [];
+    const parseRow = (row) => {
+      const cells = []; let cur = ""; let inQ = false;
+      for (let i = 0; i < row.length; i++) {
+        const c = row[i];
+        if (c === '"' && row[i+1] === '"') { cur += '"'; i++; }
+        else if (c === '"') inQ = !inQ;
+        else if (c === "," && !inQ) { cells.push(cur); cur = ""; }
+        else cur += c;
+      }
+      cells.push(cur);
+      return cells.map(c => c.trim());
+    };
+    const headers = parseRow(lines[0]).map(h => h.toLowerCase());
+    return lines.slice(1).map(line => {
+      const cells = parseRow(line);
+      const row = {};
+      headers.forEach((h, i) => row[h] = cells[i] || "");
+      return row;
+    });
+  };
+
+  // Try to extract sales data from common CSV formats (Square, Shopify, Etsy, generic)
+  const previewCsvImport = () => {
+    const rows = parseCsv(csvImportText);
+    if (!rows.length) { alert("Couldn't parse the CSV. Make sure the first row has headers."); return; }
+    const findKey = (row, options) => Object.keys(row).find(k => options.some(o => k.includes(o)));
+    const previews = rows.map(row => {
+      const itemKey = findKey(row, ["item", "product", "name", "title", "description"]);
+      const qtyKey = findKey(row, ["qty", "quantity", "units"]);
+      const priceKey = findKey(row, ["price", "amount", "gross", "subtotal", "net"]);
+      const dateKey = findKey(row, ["date", "time", "created"]);
+      const item = itemKey ? row[itemKey] : "";
+      const qty = qtyKey ? parseFloat(row[qtyKey]) || 1 : 1;
+      const priceStr = priceKey ? row[priceKey].replace(/[$,]/g, "") : "0";
+      const price = parseFloat(priceStr) || 0;
+      const date = dateKey ? row[dateKey].split("T")[0].split(" ")[0] : "";
+      // Try to match an existing product by name
+      const matchedProduct = products.find(p => item && p.name.toLowerCase().includes(item.toLowerCase()) || (item && item.toLowerCase().includes(p.name.toLowerCase())));
+      return { item, qty, price, date, matchedProductId: matchedProduct?.id || null, matchedProductName: matchedProduct?.name || null };
+    }).filter(p => p.item && p.price > 0);
+    setCsvImportPreview(previews);
+  };
+
+  const saveCsvImport = async () => {
+    if (!csvImportEventId) { alert("Pick an event first"); return; }
+    const eventId = Number(csvImportEventId);
+    const eventName = events.find(e => e.id === eventId)?.name || "Unknown";
+    const fallbackDate = events.find(e => e.id === eventId)?.date || new Date().toISOString().split("T")[0];
+    setSaving(true);
+    const shEntries = csvImportPreview.filter(r => r.matchedProductId).map(r => ({
+      product_id: r.matchedProductId, product_name: r.matchedProductName, price: r.price, cogs: products.find(p => p.id === r.matchedProductId)?.cogs || 0, qty: r.qty, revenue: r.price * r.qty, event_id: eventId, event_name: eventName, date: r.date || fallbackDate,
+    }));
+    if (shEntries.length > 0) {
+      const shRes = await sb.insert(token, "sales_history", shEntries);
+      setProductSalesHistory(prev => [...prev, ...(Array.isArray(shRes) ? shRes : [shRes])]);
+    }
+    // For unmatched items create transactions only
+    const txEntries = csvImportPreview.map(r => ({ type: "income", description: r.matchedProductName ? `${r.qty} x ${r.matchedProductName}` : `${r.qty} x ${r.item}`, amount: r.price * r.qty, category: "Sales", source: "CSV Import", is_owner_funded: false, event_id: eventId, date: r.date || fallbackDate }));
+    const txRes = await sb.insert(token, "transactions", txEntries);
+    setTransactions(prev => [...prev, ...(Array.isArray(txRes) ? txRes : [txRes])]);
+
+    // Auto-decrement stock for matched products
+    const updatedProducts = [...products];
+    for (const entry of shEntries) {
+      const idx = updatedProducts.findIndex(p => p.id === entry.product_id);
+      if (idx >= 0 && updatedProducts[idx].stock > 0) {
+        const newStock = Math.max(0, (updatedProducts[idx].stock || 0) - entry.qty);
+        await sb.update(token, "products", entry.product_id, { stock: newStock });
+        updatedProducts[idx] = { ...updatedProducts[idx], stock: newStock };
+      }
+    }
+    setProducts(updatedProducts);
+
+    setCsvImportText(""); setCsvImportPreview([]); setShowCsvImport(false); setSaving(false);
+  };
+
   const saveSettings = async () => {
     setSaving(true);
     const data = { tax_rate: parseFloat(settingsForm.tax_rate)||25, monthly_goal: parseFloat(settingsForm.monthly_goal)||0 };
@@ -592,8 +719,8 @@ export default function App() {
   const profitPos = metrics.profit >= 0;
   const hasLiveSales = Object.values(liveSales).some(v => v > 0);
   const isMoreActive = MORE_TABS.includes(activeTab);
-  const tabLabel = (t) => ({ dashboard: "Home", events: "Events", breakeven: "Break-Even", transactions: "Ledger", inventory: "Inventory", goals: "Goals", bestsellers: "Top Sellers", blueroots: "Blue Roots" }[t] || t);
-  const tabIcon = (t) => ({ dashboard: "⊞", events: "📅", breakeven: "⚖", transactions: "↕", inventory: "📦", goals: "🎯", bestsellers: "🏆", blueroots: "🌿" }[t] || "•");
+  const tabLabel = (t) => ({ dashboard: "Home", events: "Events", breakeven: "Break-Even", transactions: "Ledger", inventory: "Inventory", goals: "Goals", bestsellers: "Top Sellers", blueroots: "Blue Roots", whatif: "What-If" }[t] || t);
+  const tabIcon = (t) => ({ dashboard: "⊞", events: "📅", breakeven: "⚖", transactions: "↕", inventory: "📦", goals: "🎯", bestsellers: "🏆", blueroots: "🌿", whatif: "🔮" }[t] || "•");
 
   // ── CSS ───────────────────────────────────────────────────────────────────────
   const css = `
@@ -1152,6 +1279,34 @@ export default function App() {
               const eventProductIds = selectedEvent?.product_ids ? selectedEvent.product_ids.split(",").filter(Boolean).map(Number) : null;
               const visibleProducts = eventProductIds && eventProductIds.length > 0 ? products.filter(p => eventProductIds.includes(p.id)) : products;
               return (
+              <>
+              {/* Sales entry mode buttons */}
+              <div className="card" style={{ marginBottom: 12, padding: "14px 18px" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Three Ways to Track Sales</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8 }}>
+                  <button onClick={() => { setQuickEntryEventId(breakEvenEventId !== "all" ? breakEvenEventId : (events.find(e => e.name !== "General Operations")?.id || "")); setShowQuickEntry(true); }}
+                    style={{ background: "white", border: `1.5px solid ${C.border}`, borderRadius: 12, padding: "12px 14px", cursor: "pointer", textAlign: "left", transition: "all 0.15s" }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = C.blue; e.currentTarget.style.background = C.blueLight; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = "white"; }}>
+                    <div style={{ fontSize: 18, marginBottom: 4 }}>⚡</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>Quick Entry</div>
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 2, lineHeight: 1.4 }}>Enter totals after the event</div>
+                  </button>
+                  <button onClick={() => { setCsvImportEventId(breakEvenEventId !== "all" ? breakEvenEventId : (events.find(e => e.name !== "General Operations")?.id || "")); setShowCsvImport(true); }}
+                    style={{ background: "white", border: `1.5px solid ${C.border}`, borderRadius: 12, padding: "12px 14px", cursor: "pointer", textAlign: "left", transition: "all 0.15s" }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = C.blue; e.currentTarget.style.background = C.blueLight; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = "white"; }}>
+                    <div style={{ fontSize: 18, marginBottom: 4 }}>📋</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>Import from Square/Etsy</div>
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 2, lineHeight: 1.4 }}>Paste CSV from any platform</div>
+                  </button>
+                  <div style={{ background: C.blueLight, border: `1.5px solid ${C.blue}`, borderRadius: 12, padding: "12px 14px", textAlign: "left" }}>
+                    <div style={{ fontSize: 18, marginBottom: 4 }}>👇</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>Live Tracker (below)</div>
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 2, lineHeight: 1.4 }}>Tap + during the event</div>
+                  </div>
+                </div>
+              </div>
               <div className="card" style={{ marginBottom: 20, borderColor: "#BFDBFE", background: C.blueLight }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}><div style={{ width: 8, height: 8, borderRadius: "50%", background: C.green }}/><span style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>Live Sales Tracker</span></div>
@@ -1183,6 +1338,7 @@ export default function App() {
                 </div>
                 {beMetrics.liveRevenue > 0 && <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #BFDBFE", display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 13, color: C.slate }}>Live total</span><span style={{ fontSize: 16, fontWeight: 700, color: C.green }}>+{fmt(beMetrics.liveRevenue)}</span></div>}
               </div>
+              </>
               );
             })()}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
@@ -1454,6 +1610,200 @@ export default function App() {
                   </>}
                 </>
             }
+          </div>
+        )}
+
+        {/* WHAT-IF PLANNER */}
+        {activeTab === "whatif" && (
+          <div className="fu">
+            <div className="card" style={{ marginBottom: 20, background: "linear-gradient(135deg, #1B2A4A 0%, #2D4270 100%)", borderColor: C.navy }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                <span style={{ fontSize: 32 }}>🔮</span>
+                <div>
+                  <div style={{ fontFamily: "Georgia,serif", fontSize: 22, color: "#F5F0E8", fontWeight: 500 }}>What-If Planner</div>
+                  <div style={{ fontFamily: "sans-serif", fontSize: 10, letterSpacing: "0.14em", color: "#8BBF9A", marginTop: 2, textTransform: "uppercase" }}>Test decisions before you make them</div>
+                </div>
+              </div>
+              <p style={{ fontSize: 13, color: "rgba(255,255,255,0.75)", lineHeight: 1.65, margin: 0 }}>
+                Use your real numbers to model business decisions. <strong style={{ color: "#5CC882" }}>What if your supplies cost more? What if you raise prices? What if you sell wholesale?</strong> See the impact instantly so you can make confident decisions.
+              </p>
+            </div>
+
+            {products.length === 0 ? (
+              <div className="card"><EmptyState icon="🔮" title="Add products first" body="What-If scenarios use your real product costs and prices. Add at least one product to start modeling." btnLabel="+ Add Product" onBtn={() => setShowAddProduct(true)} /></div>
+            ) : (
+              <>
+                {/* Scenario 1: Supply cost increase */}
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'Clash Display','Inter',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 4 }}>📈 What if my supplies cost more?</div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>Inflation, supplier price hikes, or shipping increases</div>
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <label style={{ marginBottom: 0 }}>Supply cost increase</label>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: whatIfSupplyIncrease > 20 ? C.red : whatIfSupplyIncrease > 10 ? C.amber : C.green }}>+{whatIfSupplyIncrease}%</span>
+                    </div>
+                    <input type="range" min="0" max="50" step="5" value={whatIfSupplyIncrease} onChange={e => setWhatIfSupplyIncrease(Number(e.target.value))} style={{ width: "100%", accentColor: C.navy }}/>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.muted, marginTop: 4 }}><span>0%</span><span>50%</span></div>
+                  </div>
+                  {(() => {
+                    const newCogsList = products.map(p => ({ ...p, newCogs: (p.cogs || 0) * (1 + whatIfSupplyIncrease / 100) }));
+                    const oldProfit = products.reduce((s, p) => s + (p.price - (p.cogs || 0)), 0);
+                    const newProfit = newCogsList.reduce((s, p) => s + (p.price - p.newCogs), 0);
+                    const profitDrop = oldProfit - newProfit;
+                    const unprofitable = newCogsList.filter(p => p.price > 0 && p.price - p.newCogs <= 0);
+                    return (
+                      <div style={{ background: profitDrop > 0 ? C.amberBg : C.greenBg, borderRadius: 10, padding: "12px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                          <span style={{ fontSize: 12, color: C.slate, fontWeight: 600 }}>Total profit per round of products:</span>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: profitDrop > 0 ? C.amber : C.green }}>{fmt(oldProfit)} → {fmt(newProfit)}</span>
+                        </div>
+                        {profitDrop > 0 && <div style={{ fontSize: 12, color: C.slate, marginBottom: unprofitable.length > 0 ? 6 : 0 }}>You'd lose <strong style={{ color: C.red }}>{fmt(profitDrop)}</strong> in profit per round at current prices.</div>}
+                        {unprofitable.length > 0 && <div style={{ fontSize: 12, color: C.red, fontWeight: 600 }}>⚠ {unprofitable.length} {unprofitable.length === 1 ? "product becomes" : "products become"} unprofitable: {unprofitable.map(p => p.name).join(", ")}</div>}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Scenario 2: Raise prices */}
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'Clash Display','Inter',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 4 }}>💲 What if I raise my prices?</div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>Test different price points per product</div>
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {products.map(p => {
+                      const newPrice = whatIfPrice[p.id] !== undefined ? whatIfPrice[p.id] : p.price;
+                      const oldMargin = p.price > 0 ? ((p.price - (p.cogs||0)) / p.price) * 100 : 0;
+                      const newMargin = newPrice > 0 ? ((newPrice - (p.cogs||0)) / newPrice) * 100 : 0;
+                      const marginGain = newMargin - oldMargin;
+                      return (
+                        <div key={p.id} style={{ background: C.slateLight, borderRadius: 10, padding: "10px 14px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
+                            <div style={{ fontWeight: 600, fontSize: 13, color: C.navy }}>{p.name}</div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span style={{ fontSize: 11, color: C.muted }}>Current {fmt(p.price)} →</span>
+                              <input type="number" value={newPrice} onChange={e => setWhatIfPrice(prev => ({ ...prev, [p.id]: parseFloat(e.target.value) || 0 }))}
+                                style={{ width: 80, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 13, fontWeight: 600 }}/>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                            <span style={{ color: C.muted }}>Margin: <strong style={{ color: oldMargin >= 30 ? C.green : C.amber }}>{pct(oldMargin)}</strong> → <strong style={{ color: newMargin >= 30 ? C.green : newMargin > 0 ? C.amber : C.red }}>{pct(newMargin)}</strong></span>
+                            <span style={{ color: marginGain > 0 ? C.green : marginGain < 0 ? C.red : C.muted, fontWeight: 600 }}>{marginGain > 0 ? "+" : ""}{marginGain.toFixed(1)} pts</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ background: C.blueLight, borderRadius: 10, padding: "10px 14px", marginTop: 12, fontSize: 12, color: C.slate, lineHeight: 1.5 }}>
+                    💡 <strong>Smart pricing tip:</strong> A 20% price increase only requires keeping ~80% of customers to come out ahead. Most vendors underprice — your true cost matters more than competitor matching.
+                  </div>
+                </div>
+
+                {/* Scenario 3: Sell wholesale */}
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'Clash Display','Inter',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 4 }}>🏪 What if I sell wholesale?</div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>Most wholesale = 50% off retail. See if it's worth it.</div>
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <label style={{ marginBottom: 0 }}>Wholesale discount</label>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: C.purple }}>{whatIfWholesaleDiscount}% off retail</span>
+                    </div>
+                    <input type="range" min="20" max="60" step="5" value={whatIfWholesaleDiscount} onChange={e => setWhatIfWholesaleDiscount(Number(e.target.value))} style={{ width: "100%", accentColor: C.purple }}/>
+                  </div>
+                  {(() => {
+                    const wholesalePrices = products.map(p => ({ ...p, wholesalePrice: p.price * (1 - whatIfWholesaleDiscount / 100), wholesaleMargin: p.price > 0 ? ((p.price * (1 - whatIfWholesaleDiscount / 100) - (p.cogs || 0)) / (p.price * (1 - whatIfWholesaleDiscount / 100))) * 100 : 0 }));
+                    const losers = wholesalePrices.filter(p => p.wholesalePrice <= (p.cogs || 0));
+                    const avgRetailMargin = products.length > 0 ? products.reduce((s, p) => s + (p.price > 0 ? ((p.price - (p.cogs||0)) / p.price) * 100 : 0), 0) / products.length : 0;
+                    const avgWholesaleMargin = wholesalePrices.length > 0 ? wholesalePrices.reduce((s, p) => s + p.wholesaleMargin, 0) / wholesalePrices.length : 0;
+                    return (
+                      <div style={{ background: losers.length > 0 ? C.redBg : avgWholesaleMargin >= 20 ? C.greenBg : C.amberBg, borderRadius: 10, padding: "12px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                          <span style={{ fontSize: 12, color: C.slate, fontWeight: 600 }}>Average margin:</span>
+                          <span style={{ fontSize: 13, fontWeight: 700 }}><span style={{ color: avgRetailMargin >= 30 ? C.green : C.amber }}>{pct(avgRetailMargin)}</span> retail → <span style={{ color: avgWholesaleMargin >= 20 ? C.green : avgWholesaleMargin > 0 ? C.amber : C.red }}>{pct(avgWholesaleMargin)}</span> wholesale</span>
+                        </div>
+                        {losers.length > 0 ? <div style={{ fontSize: 12, color: C.red, fontWeight: 600 }}>⚠ {losers.length} {losers.length === 1 ? "product would lose money" : "products would lose money"} at this wholesale price: {losers.map(p => p.name).join(", ")}</div>
+                          : avgWholesaleMargin >= 20 ? <div style={{ fontSize: 12, color: C.green }}>✓ Wholesale could work — you'd still earn a healthy margin. Volume becomes the question.</div>
+                          : <div style={{ fontSize: 12, color: C.amber }}>⚠ Margin is tight at wholesale. You'd need significant volume to make it worth your time.</div>
+                        }
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Scenario 4: Hire help */}
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'Clash Display','Inter',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 4 }}>👥 What if I pay someone to help?</div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>See what your event needs to make to cover labor</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                    <div><label>Hourly Rate ($)</label><input className="inp" type="number" value={whatIfHelperRate} onChange={e => setWhatIfHelperRate(parseFloat(e.target.value) || 0)}/></div>
+                    <div><label>Hours Worked</label><input className="inp" type="number" value={whatIfHelperHours} onChange={e => setWhatIfHelperHours(parseFloat(e.target.value) || 0)}/></div>
+                  </div>
+                  {(() => {
+                    const laborCost = whatIfHelperRate * whatIfHelperHours;
+                    const avgEventProfit = events.filter(e => e.name !== "General Operations" && !e.archived).map(ev => {
+                      const tx = transactions.filter(t => t.event_id === ev.id);
+                      const inc = tx.filter(t => t.type === "income").reduce((s,t) => s+t.amount, 0);
+                      const exp = tx.filter(t => t.type === "expense" && !t.is_owner_funded).reduce((s,t) => s+t.amount, 0);
+                      return inc - exp;
+                    });
+                    const avg = avgEventProfit.length > 0 ? avgEventProfit.reduce((s,p) => s+p, 0) / avgEventProfit.length : 0;
+                    const newProfit = avg - laborCost;
+                    return laborCost > 0 ? (
+                      <div style={{ background: newProfit > 0 ? C.greenBg : C.redBg, borderRadius: 10, padding: "12px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                          <span style={{ fontSize: 12, color: C.slate, fontWeight: 600 }}>Labor cost per event:</span>
+                          <span style={{ fontSize: 14, fontWeight: 700, color: C.red }}>{fmt(laborCost)}</span>
+                        </div>
+                        {avg > 0 && <>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontSize: 12, color: C.slate, fontWeight: 600 }}>Your average event profit:</span>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: C.green }}>{fmt(avg)}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, paddingTop: 6, borderTop: "1px solid rgba(0,0,0,0.05)" }}>
+                            <span style={{ color: C.slate, fontWeight: 600 }}>New profit after labor:</span>
+                            <span style={{ fontWeight: 700, color: newProfit > 0 ? C.green : C.red }}>{fmt(newProfit)}</span>
+                          </div>
+                        </>}
+                        {avg === 0 && <div style={{ fontSize: 12, color: C.slate, marginTop: 4 }}>Add transactions to your events to compare against your real profit.</div>}
+                      </div>
+                    ) : <div style={{ fontSize: 12, color: C.muted, fontStyle: "italic" }}>Enter hours and rate above to see the impact.</div>;
+                  })()}
+                </div>
+
+                {/* Scenario 5: Scale up events */}
+                <div className="card" style={{ marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'Clash Display','Inter',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 4 }}>📅 What if I do more events per month?</div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>Project your monthly numbers if you scale up</div>
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <label style={{ marginBottom: 0 }}>Events per month</label>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: C.blue }}>{whatIfEventsPerMonth} {whatIfEventsPerMonth === 1 ? "event" : "events"}</span>
+                    </div>
+                    <input type="range" min="1" max="12" step="1" value={whatIfEventsPerMonth} onChange={e => setWhatIfEventsPerMonth(Number(e.target.value))} style={{ width: "100%", accentColor: C.blue }}/>
+                  </div>
+                  {(() => {
+                    const eventStats = events.filter(e => e.name !== "General Operations" && !e.archived).map(ev => {
+                      const tx = transactions.filter(t => t.event_id === ev.id);
+                      return { rev: tx.filter(t => t.type === "income").reduce((s,t) => s+t.amount, 0), exp: tx.filter(t => t.type === "expense" && !t.is_owner_funded).reduce((s,t) => s+t.amount, 0) };
+                    }).filter(e => e.rev > 0);
+                    const avgRev = eventStats.length > 0 ? eventStats.reduce((s,e) => s+e.rev, 0) / eventStats.length : 0;
+                    const avgExp = eventStats.length > 0 ? eventStats.reduce((s,e) => s+e.exp, 0) / eventStats.length : 0;
+                    const projRev = avgRev * whatIfEventsPerMonth;
+                    const projExp = avgExp * whatIfEventsPerMonth;
+                    const projProfit = projRev - projExp;
+                    return avgRev > 0 ? (
+                      <div style={{ background: C.blueLight, borderRadius: 10, padding: "12px 14px" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(100px,1fr))", gap: 12 }}>
+                          <div><div style={{ fontSize: 10, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Monthly Revenue</div><div style={{ fontSize: 18, fontWeight: 700, color: C.green, marginTop: 2 }}>{fmt(projRev)}</div></div>
+                          <div><div style={{ fontSize: 10, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Monthly Costs</div><div style={{ fontSize: 18, fontWeight: 700, color: C.red, marginTop: 2 }}>{fmt(projExp)}</div></div>
+                          <div><div style={{ fontSize: 10, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Monthly Profit</div><div style={{ fontSize: 18, fontWeight: 700, color: C.navy, marginTop: 2 }}>{fmt(projProfit)}</div></div>
+                          <div><div style={{ fontSize: 10, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Yearly Profit</div><div style={{ fontSize: 18, fontWeight: 700, color: C.purple, marginTop: 2 }}>{fmt(projProfit * 12)}</div></div>
+                        </div>
+                        <div style={{ fontSize: 11, color: C.muted, marginTop: 10, fontStyle: "italic" }}>Based on your average event ({fmt(avgRev)} revenue, {fmt(avgExp)} expenses)</div>
+                      </div>
+                    ) : <div style={{ fontSize: 12, color: C.muted, fontStyle: "italic" }}>Add transactions to your events to see projections.</div>;
+                  })()}
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -1751,6 +2101,110 @@ export default function App() {
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button className="btn-o" onClick={() => setEditTx(null)}>Cancel</button>
               <button className="btn-p" onClick={updateTransaction}>{saving ? "Saving..." : "Save Changes"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QUICK ENTRY MODAL */}
+      {showQuickEntry && (
+        <div className="overlay" onClick={e => e.target === e.currentTarget && setShowQuickEntry(false)}>
+          <div className="modal" style={{ maxWidth: 520 }}>
+            <MTitle>⚡ Quick Entry</MTitle>
+            <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, lineHeight: 1.5 }}>Enter how many of each product you sold. Perfect for after the event when things have calmed down.</div>
+            <div style={{ marginBottom: 14 }}><label>Event</label>
+              <select className="sel" value={quickEntryEventId} onChange={e => setQuickEntryEventId(e.target.value)}>
+                <option value="">— Select an event —</option>
+                {events.filter(e => e.name !== "General Operations" && !e.archived).map(ev => <option key={ev.id} value={ev.id}>{ev.name}{ev.date ? ` (${ev.date})` : ""}</option>)}
+              </select>
+            </div>
+            {products.length === 0 ? (
+              <div style={{ background: C.amberBg, borderRadius: 10, padding: "12px 14px", color: C.amber, fontSize: 13, marginBottom: 18 }}>You need to add products first before you can track sales.</div>
+            ) : (() => {
+              const eventForFilter = events.find(e => String(e.id) === quickEntryEventId);
+              const evProductIds = eventForFilter?.product_ids ? eventForFilter.product_ids.split(",").filter(Boolean).map(Number) : null;
+              const visibleProds = evProductIds && evProductIds.length > 0 ? products.filter(p => evProductIds.includes(p.id)) : products;
+              return (
+                <>
+                  <div style={{ marginBottom: 8, fontSize: 12, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Products Sold</div>
+                  <div style={{ display: "grid", gap: 8, marginBottom: 14, maxHeight: 320, overflowY: "auto", padding: 4 }}>
+                    {visibleProds.map(p => {
+                      const qty = parseInt(quickEntryData[p.id] || 0) || 0;
+                      const subtotal = qty * (p.price || 0);
+                      return (
+                        <div key={p.id} style={{ background: qty > 0 ? C.greenBg : C.slateLight, borderRadius: 10, padding: "10px 12px", display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: C.navy, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
+                            <div style={{ fontSize: 11, color: C.muted }}>{fmt(p.price)} each</div>
+                          </div>
+                          <input type="number" min="0" placeholder="0" value={quickEntryData[p.id] || ""} onChange={e => setQuickEntryData(prev => ({ ...prev, [p.id]: e.target.value }))}
+                            style={{ width: 64, textAlign: "center", padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 14, fontWeight: 700 }}/>
+                          {qty > 0 && <span style={{ fontSize: 13, fontWeight: 700, color: C.green, minWidth: 60, textAlign: "right" }}>{fmt(subtotal)}</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const total = Object.entries(quickEntryData).reduce((sum, [pid, qty]) => {
+                      const p = products.find(p => String(p.id) === String(pid));
+                      return sum + ((parseInt(qty) || 0) * (p?.price || 0));
+                    }, 0);
+                    return total > 0 && <div style={{ background: C.navy, color: "white", borderRadius: 10, padding: "12px 16px", marginBottom: 18, display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>Total Revenue</span>
+                      <span style={{ fontSize: 18, fontWeight: 700, color: "#5CC882" }}>{fmt(total)}</span>
+                    </div>;
+                  })()}
+                </>
+              );
+            })()}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn-o" onClick={() => { setShowQuickEntry(false); setQuickEntryData({}); }}>Cancel</button>
+              <button className="btn-p" onClick={saveQuickEntry} disabled={saving || !quickEntryEventId}>{saving ? "Saving..." : "Save Sales"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CSV IMPORT MODAL */}
+      {showCsvImport && (
+        <div className="overlay" onClick={e => e.target === e.currentTarget && setShowCsvImport(false)}>
+          <div className="modal" style={{ maxWidth: 600 }}>
+            <MTitle>📋 Import Sales from CSV</MTitle>
+            <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, lineHeight: 1.5 }}>Paste sales data from Square, Shopify, Etsy, or any platform that exports CSV. The app will try to match item names to your products automatically.</div>
+            <div style={{ marginBottom: 14 }}><label>Event</label>
+              <select className="sel" value={csvImportEventId} onChange={e => setCsvImportEventId(e.target.value)}>
+                <option value="">— Select an event —</option>
+                {events.filter(e => e.name !== "General Operations" && !e.archived).map(ev => <option key={ev.id} value={ev.id}>{ev.name}{ev.date ? ` (${ev.date})` : ""}</option>)}
+              </select>
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <label>Paste CSV Data (with header row)</label>
+              <textarea value={csvImportText} onChange={e => setCsvImportText(e.target.value)}
+                placeholder={"item,quantity,price,date\nLavender Candle,2,18.00,2025-04-15\nVanilla Soap,1,8.50,2025-04-15"}
+                rows="6"
+                style={{ width: "100%", padding: "10px 14px", border: `1.5px solid ${C.border}`, borderRadius: 10, fontFamily: "monospace", fontSize: 12, resize: "vertical", boxSizing: "border-box" }}/>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 6, lineHeight: 1.5 }}>The app looks for columns like "item/product", "quantity/qty", "price/amount", and "date". Most exports work automatically.</div>
+            </div>
+            <button className="btn-o" style={{ width: "100%", marginBottom: 14 }} onClick={previewCsvImport} disabled={!csvImportText.trim()}>Preview Import</button>
+            {csvImportPreview.length > 0 && (
+              <div style={{ background: C.slateLight, borderRadius: 10, padding: "12px 14px", marginBottom: 14, maxHeight: 240, overflowY: "auto" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>{csvImportPreview.length} sales found</div>
+                {csvImportPreview.map((p, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: i < csvImportPreview.length - 1 ? `1px solid ${C.border}` : "none", fontSize: 12 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, color: C.navy, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.qty} × {p.item}</div>
+                      <div style={{ fontSize: 10, color: p.matchedProductName ? C.green : C.amber, marginTop: 2 }}>
+                        {p.matchedProductName ? `✓ Matched to "${p.matchedProductName}"` : "⚠ No product match — will save as transaction only"}
+                      </div>
+                    </div>
+                    <div style={{ fontWeight: 700, color: C.green, marginLeft: 12 }}>{fmt(p.price * p.qty)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn-o" onClick={() => { setShowCsvImport(false); setCsvImportText(""); setCsvImportPreview([]); }}>Cancel</button>
+              <button className="btn-p" onClick={saveCsvImport} disabled={saving || !csvImportEventId || csvImportPreview.length === 0}>{saving ? "Importing..." : `Import ${csvImportPreview.length} Sales`}</button>
             </div>
           </div>
         </div>
