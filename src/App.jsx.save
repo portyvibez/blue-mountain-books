@@ -1,0 +1,541 @@
+
+
+import { useState, useMemo } from "react";
+
+const CATEGORIES = ["Marketing", "Supplies", "Labor", "Venue/Rent", "Food & Bev", "Equipment", "Other"];
+const INCOME_CATEGORIES = ["Sales", "Event Revenue", "Services", "Refund", "Other Income"];
+
+const EXPENSE_SOURCES = ["Owner's Cash", "Business Checking", "Business Credit Card", "Cash App", "PayPal", "Venmo", "Square", "Zelle", "Other"];
+const INCOME_SOURCES = ["Cash", "Square", "Cash App", "PayPal", "Venmo", "Zelle", "Check", "Bank Transfer", "Other"];
+
+const formatCurrency = (n) => `$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const initialEvents = [
+  { id: 1, name: "Spring Pop-Up Market", date: "2024-03-15" },
+  { id: 2, name: "General Operations", date: "" },
+];
+
+const initialTransactions = [
+  { id: 1, type: "expense", description: "Booth supplies", amount: 150, category: "Supplies", source: "Square", isOwnerFunded: false, eventId: 1, date: "2024-03-10" },
+  { id: 2, type: "income", description: "Market sales", amount: 420, category: "Sales", source: "Square", isOwnerFunded: false, eventId: 1, date: "2024-03-15" },
+  { id: 3, type: "expense", description: "Startup supplies", amount: 500, category: "Supplies", source: "Owner's Cash", isOwnerFunded: true, eventId: 2, date: "2024-03-01" },
+  { id: 4, type: "expense", description: "Monthly supplies", amount: 80, category: "Supplies", source: "Business Checking", isOwnerFunded: false, eventId: 2, date: "2024-03-05" },
+  { id: 5, type: "income", description: "Online order", amount: 200, category: "Sales", source: "Cash App", isOwnerFunded: false, eventId: 2, date: "2024-03-20" },
+];
+
+export default function App() {
+  const [events, setEvents] = useState(initialEvents);
+  const [transactions, setTransactions] = useState(initialTransactions);
+  const [activeTab, setActiveTab] = useState("dashboard");
+  const [activeEventFilter, setActiveEventFilter] = useState("all");
+  const [showAddTx, setShowAddTx] = useState(false);
+  const [showAddEvent, setShowAddEvent] = useState(false);
+  const [txForm, setTxForm] = useState({ type: "expense", description: "", amount: "", category: CATEGORIES[0], source: EXPENSE_SOURCES[0], isOwnerFunded: false, eventId: initialEvents[0].id, date: new Date().toISOString().split("T")[0] });
+  const [eventForm, setEventForm] = useState({ name: "", date: "" });
+  const [targetRevenue, setTargetRevenue] = useState("");
+
+  const metrics = useMemo(() => {
+    const filtered = activeEventFilter === "all" ? transactions : transactions.filter(t => t.eventId === Number(activeEventFilter));
+    const totalIncome = filtered.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
+    const totalExpenses = filtered.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+    const ownerInvested = filtered.filter(t => t.isOwnerFunded).reduce((s, t) => s + t.amount, 0);
+    const operationalExpenses = totalExpenses - ownerInvested;
+    const profit = totalIncome - operationalExpenses;
+    const roi = ownerInvested > 0 ? ((profit / ownerInvested) * 100).toFixed(1) : null;
+    return { totalIncome, totalExpenses, ownerInvested, operationalExpenses, profit, roi };
+  }, [transactions, activeEventFilter]);
+
+  const eventBreakdowns = useMemo(() => {
+    return events.map(ev => {
+      const evTx = transactions.filter(t => t.eventId === ev.id);
+      const income = evTx.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
+      const expenses = evTx.filter(t => t.type === "expense" && !t.isOwnerFunded).reduce((s, t) => s + t.amount, 0);
+      return { ...ev, income, expenses, net: income - expenses };
+    });
+  }, [events, transactions]);
+
+  const breakEvenUnits = useMemo(() => {
+    if (!targetRevenue) return null;
+    const price = parseFloat(targetRevenue);
+    if (!price || price <= 0) return null;
+    const needed = metrics.operationalExpenses - metrics.totalIncome;
+    if (needed <= 0) return { units: 0, alreadyProfitable: true };
+    return { units: Math.ceil(needed / price), alreadyProfitable: false };
+  }, [targetRevenue, metrics]);
+
+  const addTransaction = () => {
+    if (!txForm.description || !txForm.amount) return;
+    setTransactions(prev => [...prev, { ...txForm, id: Date.now(), amount: parseFloat(txForm.amount), eventId: Number(txForm.eventId) }]);
+    setTxForm({ type: "expense", description: "", amount: "", category: CATEGORIES[0], source: EXPENSE_SOURCES[0], isOwnerFunded: false, eventId: events[0].id, date: new Date().toISOString().split("T")[0] });
+    setShowAddTx(false);
+  };
+
+  const addEvent = () => {
+    if (!eventForm.name) return;
+    setEvents(prev => [...prev, { id: Date.now(), ...eventForm }]);
+    setEventForm({ name: "", date: "" });
+    setShowAddEvent(false);
+  };
+
+  const deleteTransaction = (id) => setTransactions(prev => prev.filter(t => t.id !== id));
+  const displayTransactions = activeEventFilter === "all" ? transactions : transactions.filter(t => t.eventId === Number(activeEventFilter));
+
+  // Color palette
+  const C = {
+    bg: "#F7F4EF",
+    surface: "#FFFFFF",
+    navy: "#1B2A4A",
+    navyLight: "#2D4270",
+    blue: "#2563EB",
+    blueLight: "#EFF4FF",
+    slate: "#64748B",
+    slateLight: "#F1F5F9",
+    green: "#059669",
+    greenBg: "#ECFDF5",
+    red: "#DC2626",
+    redBg: "#FEF2F2",
+    amber: "#D97706",
+    amberBg: "#FFFBEB",
+    purple: "#7C3AED",
+    purpleBg: "#F5F3FF",
+    border: "#E2E8F0",
+    text: "#1E293B",
+    muted: "#94A3B8",
+  };
+
+  const profitPos = metrics.profit >= 0;
+
+  return (
+    <div style={{ fontFamily: "'Inter', -apple-system, sans-serif", background: C.bg, minHeight: "100vh", color: C.text }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Clash+Display:wght@500;600;700&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 4px; }
+
+        .tab { background: none; border: none; cursor: pointer; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; padding: 10px 18px; color: ${C.slate}; border-radius: 8px; transition: all 0.15s; letter-spacing: 0.01em; }
+        .tab.active { background: ${C.surface}; color: ${C.navy}; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+        .tab:hover:not(.active) { color: ${C.navy}; background: rgba(255,255,255,0.5); }
+
+        .card { background: ${C.surface}; border-radius: 16px; border: 1px solid ${C.border}; padding: 22px 24px; }
+
+        .btn-primary { background: ${C.navy}; color: white; border: none; border-radius: 10px; padding: 10px 20px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 600; cursor: pointer; letter-spacing: 0.02em; transition: background 0.15s; }
+        .btn-primary:hover { background: ${C.navyLight}; }
+        .btn-outline { background: white; color: ${C.navy}; border: 1.5px solid ${C.border}; border-radius: 10px; padding: 9px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+        .btn-outline:hover { border-color: ${C.navy}; }
+
+        .input { background: ${C.slateLight}; border: 1.5px solid transparent; color: ${C.text}; border-radius: 10px; padding: 10px 14px; font-family: 'Inter', sans-serif; font-size: 14px; outline: none; width: 100%; transition: all 0.15s; }
+        .input:focus { border-color: ${C.blue}; background: white; }
+        .select { background: ${C.slateLight}; border: 1.5px solid transparent; color: ${C.text}; border-radius: 10px; padding: 10px 14px; font-family: 'Inter', sans-serif; font-size: 14px; outline: none; width: 100%; cursor: pointer; transition: all 0.15s; appearance: none; }
+        .select:focus { border-color: ${C.blue}; background: white; }
+
+        .modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.45); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(6px); }
+        .modal { background: white; border-radius: 20px; padding: 28px; width: 460px; max-width: 95vw; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+
+        .filter-pill { background: none; border: 1.5px solid ${C.border}; border-radius: 20px; padding: 6px 14px; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 500; color: ${C.slate}; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+        .filter-pill.active { background: ${C.navy}; border-color: ${C.navy}; color: white; }
+        .filter-pill:hover:not(.active) { border-color: ${C.navy}; color: ${C.navy}; }
+
+        .tx-row { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid ${C.slateLight}; transition: background 0.1s; }
+        .tx-row:last-child { border-bottom: none; }
+        .tx-row:hover { background: ${C.slateLight}; }
+        .del-btn { background: none; border: none; cursor: pointer; color: ${C.border}; font-size: 18px; line-height: 1; padding: 0 4px; transition: color 0.15s; }
+        .del-btn:hover { color: ${C.red}; }
+
+        .metric-label { font-size: 12px; font-weight: 500; color: ${C.muted}; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+        .metric-value { font-family: 'Clash Display', 'Inter', sans-serif; font-size: 30px; font-weight: 700; line-height: 1; letter-spacing: -0.02em; }
+
+        .section-label { font-size: 11px; font-weight: 600; color: ${C.muted}; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 14px; }
+
+        .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px; }
+
+        .progress-track { height: 8px; background: ${C.slateLight}; border-radius: 4px; overflow: hidden; }
+        .progress-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+
+        label { font-size: 12px; font-weight: 600; color: ${C.slate}; text-transform: uppercase; letter-spacing: 0.06em; display: block; margin-bottom: 6px; }
+
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .fade-up { animation: fadeUp 0.3s ease forwards; }
+      `}</style>
+
+      {/* Header */}
+      <div style={{ background: C.navy, padding: "0 24px" }}>
+        <div style={{ maxWidth: 980, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", height: 64 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {/* Mountain icon */}
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+              <rect width="32" height="32" rx="8" fill="#2563EB"/>
+              <path d="M6 24 L16 8 L26 24 Z" fill="none" stroke="white" strokeWidth="2" strokeLinejoin="round"/>
+              <path d="M10 24 L16 14 L22 24" fill="white" opacity="0.3"/>
+              <path d="M13 24 L18 17 L23 24" fill="white" opacity="0.5"/>
+            </svg>
+            <div>
+              <div style={{ fontFamily: "'Clash Display', 'Inter', sans-serif", fontWeight: 700, fontSize: 18, color: "white", letterSpacing: "-0.01em" }}>Blue Mountain Books</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="btn-outline" style={{ background: "transparent", color: "white", borderColor: "rgba(255,255,255,0.2)" }} onClick={() => setShowAddEvent(true)}>+ Event</button>
+            <button className="btn-primary" style={{ background: "#2563EB" }} onClick={() => setShowAddTx(true)}>+ Transaction</button>
+          </div>
+        </div>
+
+        {/* Tabs inside header */}
+        <div style={{ maxWidth: 980, margin: "0 auto", display: "flex", gap: 4, paddingBottom: 12 }}>
+          {["dashboard", "events", "transactions", "breakeven"].map(t => (
+            <button key={t} className={`tab ${activeTab === t ? "active" : ""}`}
+              style={activeTab !== t ? { color: "rgba(255,255,255,0.5)" } : {}}
+              onClick={() => setActiveTab(t)}>
+              {t.charAt(0).toUpperCase() + t.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Filter Bar */}
+      {(activeTab === "dashboard" || activeTab === "transactions") && (
+        <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "10px 24px" }}>
+          <div style={{ maxWidth: 980, margin: "0 auto", display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginRight: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>Filter:</span>
+            <button className={`filter-pill ${activeEventFilter === "all" ? "active" : ""}`} onClick={() => setActiveEventFilter("all")}>All</button>
+            {events.map(ev => (
+              <button key={ev.id} className={`filter-pill ${activeEventFilter === String(ev.id) ? "active" : ""}`} onClick={() => setActiveEventFilter(String(ev.id))}>{ev.name}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ maxWidth: 980, margin: "0 auto", padding: "24px 24px" }}>
+
+        {/* DASHBOARD */}
+        {activeTab === "dashboard" && (
+          <div className="fade-up">
+            {/* Top KPIs */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 20 }}>
+              <div className="card">
+                <div className="metric-label">Total Income</div>
+                <div className="metric-value" style={{ color: C.green }}>{formatCurrency(metrics.totalIncome)}</div>
+              </div>
+              <div className="card">
+                <div className="metric-label">Operating Costs</div>
+                <div className="metric-value" style={{ color: C.red }}>{formatCurrency(metrics.operationalExpenses)}</div>
+              </div>
+              <div className="card" style={{ background: profitPos ? C.greenBg : C.redBg, borderColor: profitPos ? "#A7F3D0" : "#FECACA" }}>
+                <div className="metric-label">Net Profit</div>
+                <div className="metric-value" style={{ color: profitPos ? C.green : C.red }}>{profitPos ? "+" : "-"}{formatCurrency(metrics.profit)}</div>
+                <div style={{ marginTop: 8 }}>
+                  <span className="badge" style={{ background: profitPos ? "#D1FAE5" : "#FEE2E2", color: profitPos ? C.green : C.red }}>
+                    {profitPos ? "✓ Profitable" : "⚠ In the red"}
+                  </span>
+                </div>
+              </div>
+              <div className="card" style={{ background: C.purpleBg, borderColor: "#DDD6FE" }}>
+                <div className="metric-label">Owner Invested</div>
+                <div className="metric-value" style={{ color: C.purple }}>{formatCurrency(metrics.ownerInvested)}</div>
+                {metrics.roi !== null && <div style={{ fontSize: 12, color: C.purple, marginTop: 8, fontWeight: 600 }}>{metrics.roi}% ROI</div>}
+              </div>
+            </div>
+
+            {/* Money Flow */}
+            <div className="card" style={{ marginBottom: 20 }}>
+              <div className="section-label">Money Flow</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 14 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", height: 12, borderRadius: 6, overflow: "hidden" }}>
+                    {(() => {
+                      const total = metrics.totalIncome + metrics.operationalExpenses;
+                      const iPct = total > 0 ? (metrics.totalIncome / total * 100) : 50;
+                      return <>
+                        <div style={{ width: `${iPct}%`, background: "#10B981", transition: "width 0.5s" }} />
+                        <div style={{ flex: 1, background: "#F87171" }} />
+                      </>;
+                    })()}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                <span style={{ color: C.green, fontWeight: 600 }}>▲ Income {formatCurrency(metrics.totalIncome)}</span>
+                <span style={{ color: C.red, fontWeight: 600 }}>Expenses {formatCurrency(metrics.operationalExpenses)} ▼</span>
+              </div>
+            </div>
+
+            {/* Expense breakdown */}
+            <div className="card">
+              <div className="section-label">Expense Breakdown</div>
+              {(() => {
+                const filtered = activeEventFilter === "all" ? transactions : transactions.filter(t => t.eventId === Number(activeEventFilter));
+                const cats = {};
+                filtered.filter(t => t.type === "expense").forEach(t => { cats[t.category] = (cats[t.category] || 0) + t.amount; });
+                const sorted = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+                const max = sorted[0]?.[1] || 1;
+                const colors = { "Owner Investment": C.purple, "Marketing": "#F59E0B", "Supplies": "#3B82F6", "Labor": "#EC4899", "Venue/Rent": "#8B5CF6", "Food & Bev": "#10B981", "Equipment": "#6366F1", "Other": C.slate };
+                return sorted.length === 0
+                  ? <div style={{ color: C.muted, fontSize: 14 }}>No expense data yet</div>
+                  : sorted.map(([cat, amt]) => (
+                    <div key={cat} style={{ marginBottom: 16 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+                        <span style={{ fontWeight: 500, color: C.text }}>{cat}</span>
+                        <span style={{ fontWeight: 600, color: C.text }}>{formatCurrency(amt)}</span>
+                      </div>
+                      <div className="progress-track">
+                        <div className="progress-fill" style={{ width: `${(amt / max) * 100}%`, background: colors[cat] || C.blue }} />
+                      </div>
+                    </div>
+                  ));
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* EVENTS */}
+        {activeTab === "events" && (
+          <div className="fade-up">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+              <div className="section-label" style={{ margin: 0 }}>Event Performance</div>
+              <button className="btn-primary" onClick={() => setShowAddEvent(true)}>+ New Event</button>
+            </div>
+            <div style={{ display: "grid", gap: 14 }}>
+              {eventBreakdowns.map(ev => (
+                <div key={ev.id} className="card" style={{ borderLeft: `4px solid ${ev.net >= 0 ? C.green : C.red}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18 }}>
+                    <div>
+                      <div style={{ fontFamily: "'Clash Display', 'Inter', sans-serif", fontWeight: 700, fontSize: 18, color: C.navy, letterSpacing: "-0.01em" }}>{ev.name}</div>
+                      {ev.date && <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>{ev.date}</div>}
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Net</div>
+                      <div style={{ fontFamily: "'Clash Display', 'Inter', sans-serif", fontWeight: 700, fontSize: 24, color: ev.net >= 0 ? C.green : C.red, letterSpacing: "-0.02em" }}>
+                        {ev.net >= 0 ? "+" : "-"}{formatCurrency(ev.net)}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 28, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+                    {[["Revenue", ev.income, C.green], ["Expenses", ev.expenses, C.red], ["Margin", ev.income > 0 ? `${((ev.net / ev.income) * 100).toFixed(0)}%` : "—", C.navy]].map(([label, val, color]) => (
+                      <div key={label}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{label}</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color }}>{typeof val === "number" ? formatCurrency(val) : val}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* TRANSACTIONS */}
+        {activeTab === "transactions" && (
+          <div className="fade-up">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+              <div className="section-label" style={{ margin: 0 }}>{displayTransactions.length} Transactions</div>
+              <button className="btn-primary" onClick={() => setShowAddTx(true)}>+ Add</button>
+            </div>
+            <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+              {displayTransactions.length === 0
+                ? <div style={{ padding: 24, color: C.muted, fontSize: 14 }}>No transactions yet.</div>
+                : [...displayTransactions].sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(tx => (
+                  <div key={tx.id} className="tx-row">
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: tx.type === "income" ? C.green : tx.isOwnerFunded ? C.purple : C.red, flexShrink: 0 }} />
+                    <div style={{ width: 36, height: 36, borderRadius: 10, background: tx.type === "income" ? C.greenBg : tx.isOwnerFunded ? C.purpleBg : C.redBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>
+                      {tx.type === "income" ? "↑" : tx.isOwnerFunded ? "★" : "↓"}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 500, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{tx.description}</div>
+                      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+                      {tx.category} · {tx.source && <span style={{ background: tx.isOwnerFunded ? C.purpleBg : C.slateLight, color: tx.isOwnerFunded ? C.purple : C.slate, padding: "1px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600 }}>{tx.isOwnerFunded ? "★ Owner" : tx.source}</span>} · {events.find(e => e.id === tx.eventId)?.name} · {tx.date}
+                    </div>
+                    </div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: tx.type === "income" ? C.green : tx.isOwnerFunded ? C.purple : C.red, flexShrink: 0 }}>
+                      {tx.type === "income" ? "+" : "-"}{formatCurrency(tx.amount)}
+                    </div>
+                    <button className="del-btn" onClick={() => deleteTransaction(tx.id)}>×</button>
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+        )}
+
+        {/* BREAKEVEN */}
+        {activeTab === "breakeven" && (
+          <div className="fade-up">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
+              <div className="card">
+                <div className="metric-label">Total Spent</div>
+                <div className="metric-value" style={{ color: C.red }}>{formatCurrency(metrics.operationalExpenses)}</div>
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>Excluding owner investment</div>
+              </div>
+              <div className="card">
+                <div className="metric-label">Revenue Earned</div>
+                <div className="metric-value" style={{ color: C.green }}>{formatCurrency(metrics.totalIncome)}</div>
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>{metrics.profit >= 0 ? `${formatCurrency(metrics.profit)} ahead` : `${formatCurrency(Math.abs(metrics.profit))} to go`}</div>
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 20 }}>
+              <div className="section-label">Gap to Break Even</div>
+              {metrics.profit >= 0 ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontSize: 32, }}>🎉</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 16, color: C.green }}>You're already profitable!</div>
+                    <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>Up {formatCurrency(metrics.profit)} over operating costs</div>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 14 }}>
+                    <div style={{ fontFamily: "'Clash Display', 'Inter', sans-serif", fontWeight: 700, fontSize: 40, color: C.red, letterSpacing: "-0.03em" }}>{formatCurrency(Math.abs(metrics.profit))}</div>
+                    <div style={{ fontSize: 14, color: C.muted }}>still needed</div>
+                  </div>
+                  <div className="progress-track">
+                    <div className="progress-fill" style={{ width: `${Math.min(100, (metrics.totalIncome / (metrics.operationalExpenses || 1)) * 100)}%`, background: `linear-gradient(90deg, ${C.blue}, ${C.green})` }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, marginTop: 8 }}>
+                    <span>{((metrics.totalIncome / (metrics.operationalExpenses || 1)) * 100).toFixed(0)}% covered</span>
+                    <span>Goal {formatCurrency(metrics.operationalExpenses)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <div className="section-label">Unit Calculator</div>
+              <div style={{ marginBottom: 20 }}>
+                <label>Your price per item / sale</label>
+                <input className="input" type="number" placeholder="e.g. 25.00" value={targetRevenue} onChange={e => setTargetRevenue(e.target.value)} style={{ maxWidth: 240 }} />
+              </div>
+
+              {breakEvenUnits !== null && (
+                <div style={{ background: breakEvenUnits.alreadyProfitable ? C.greenBg : C.amberBg, borderRadius: 12, padding: 20, border: `1px solid ${breakEvenUnits.alreadyProfitable ? "#A7F3D0" : "#FDE68A"}`, marginBottom: 20 }}>
+                  {breakEvenUnits.alreadyProfitable ? (
+                    <div style={{ color: C.green, fontWeight: 600, fontSize: 15 }}>✓ Already profitable — every new sale is pure profit!</div>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: C.amber, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>You need to sell</div>
+                      <div style={{ fontFamily: "'Clash Display', 'Inter', sans-serif", fontWeight: 700, fontSize: 56, color: C.navy, letterSpacing: "-0.03em", lineHeight: 1 }}>{breakEvenUnits.units}</div>
+                      <div style={{ fontSize: 14, color: C.slate, marginTop: 8 }}>more units at {formatCurrency(parseFloat(targetRevenue))} each to break even</div>
+                      <div style={{ fontSize: 13, color: C.muted, marginTop: 6 }}>= {formatCurrency(breakEvenUnits.units * parseFloat(targetRevenue))} total revenue needed</div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {targetRevenue && parseFloat(targetRevenue) > 0 && (
+                <>
+                  <div className="section-label" style={{ marginBottom: 12 }}>What-If Scenarios</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+                    {[10, 25, 50, 100].map(units => {
+                      const earned = units * parseFloat(targetRevenue);
+                      const newProfit = metrics.totalIncome + earned - metrics.operationalExpenses;
+                      const pos = newProfit >= 0;
+                      return (
+                        <div key={units} style={{ background: pos ? C.greenBg : C.slateLight, borderRadius: 12, padding: 16, border: `1px solid ${pos ? "#A7F3D0" : C.border}` }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Sell {units} more</div>
+                          <div style={{ fontSize: 15, fontWeight: 700, color: pos ? C.green : C.red }}>{pos ? "PROFIT" : "LOSS"} {formatCurrency(Math.abs(newProfit))}</div>
+                          <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>+{formatCurrency(earned)} revenue</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {showAddTx && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowAddTx(false)}>
+          <div className="modal">
+            <div style={{ fontFamily: "'Clash Display', 'Inter', sans-serif", fontWeight: 700, fontSize: 20, color: C.navy, marginBottom: 22, letterSpacing: "-0.01em" }}>Add Transaction</div>
+
+            {/* Row 1: Type + Amount */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+              <div><label>Type</label>
+                <select className="select" value={txForm.type} onChange={e => setTxForm(f => ({ ...f, type: e.target.value, category: e.target.value === "income" ? INCOME_CATEGORIES[0] : CATEGORIES[0], source: e.target.value === "income" ? INCOME_SOURCES[0] : EXPENSE_SOURCES[0], isOwnerFunded: false }))}>
+                  <option value="expense">Expense</option>
+                  <option value="income">Income</option>
+                </select>
+              </div>
+              <div><label>Amount ($)</label>
+                <input className="input" type="number" placeholder="0.00" value={txForm.amount} onChange={e => setTxForm(f => ({ ...f, amount: e.target.value }))} />
+              </div>
+            </div>
+
+            {/* Row 2: Description */}
+            <div style={{ marginBottom: 14 }}><label>Description</label>
+              <input className="input" placeholder="What was this for?" value={txForm.description} onChange={e => setTxForm(f => ({ ...f, description: e.target.value }))} />
+            </div>
+
+            {/* Row 3: Category + Payment Source */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+              <div><label>Category</label>
+                <select className="select" value={txForm.category} onChange={e => setTxForm(f => ({ ...f, category: e.target.value }))}>
+                  {(txForm.type === "income" ? INCOME_CATEGORIES : CATEGORIES).map(c => <option key={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label>{txForm.type === "income" ? "Received Via" : "Paid With"}</label>
+                <select className="select" value={txForm.source} onChange={e => setTxForm(f => ({ ...f, source: e.target.value }))}>
+                  {(txForm.type === "income" ? INCOME_SOURCES : EXPENSE_SOURCES).map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {/* Owner funded toggle — only for expenses */}
+            {txForm.type === "expense" && (
+              <div style={{ marginBottom: 14, background: txForm.isOwnerFunded ? C.purpleBg : C.slateLight, borderRadius: 12, padding: "12px 16px", border: `1.5px solid ${txForm.isOwnerFunded ? "#DDD6FE" : "transparent"}`, cursor: "pointer", transition: "all 0.15s" }}
+                onClick={() => setTxForm(f => ({ ...f, isOwnerFunded: !f.isOwnerFunded }))}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: txForm.isOwnerFunded ? C.purple : C.text }}>★ Owner Funded</div>
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>This expense came out of your personal money</div>
+                  </div>
+                  <div style={{ width: 40, height: 22, borderRadius: 11, background: txForm.isOwnerFunded ? C.purple : C.border, transition: "background 0.2s", position: "relative", flexShrink: 0 }}>
+                    <div style={{ position: "absolute", top: 3, left: txForm.isOwnerFunded ? 21 : 3, width: 16, height: 16, borderRadius: "50%", background: "white", transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Row 4: Event + Date */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 22 }}>
+              <div><label>Event</label>
+                <select className="select" value={txForm.eventId} onChange={e => setTxForm(f => ({ ...f, eventId: e.target.value }))}>
+                  {events.map(ev => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
+                </select>
+              </div>
+              <div><label>Date</label>
+                <input className="input" type="date" value={txForm.date} onChange={e => setTxForm(f => ({ ...f, date: e.target.value }))} />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn-outline" onClick={() => setShowAddTx(false)}>Cancel</button>
+              <button className="btn-primary" onClick={addTransaction}>Add Transaction</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Event Modal */}
+      {showAddEvent && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowAddEvent(false)}>
+          <div className="modal">
+            <div style={{ fontFamily: "'Clash Display', 'Inter', sans-serif", fontWeight: 700, fontSize: 20, color: C.navy, marginBottom: 22, letterSpacing: "-0.01em" }}>New Event</div>
+            <div style={{ marginBottom: 14 }}><label>Event Name</label>
+              <input className="input" placeholder="e.g. Canton Farmers Market — June" value={eventForm.name} onChange={e => setEventForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div style={{ marginBottom: 22 }}><label>Date (optional)</label>
+              <input className="input" type="date" value={eventForm.date} onChange={e => setEventForm(f => ({ ...f, date: e.target.value }))} />
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn-outline" onClick={() => setShowAddEvent(false)}>Cancel</button>
+              <button className="btn-primary" onClick={addEvent}>Create Event</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
